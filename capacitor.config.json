@@ -1,0 +1,9 @@
+{
+  "appId": "com.kcbyk.spotidown",
+  "appName": "SpotiDown",
+  "webDir": "public",
+  "server": {
+    "url": "https://spoti-down-sage.vercel.app",
+    "cleartext": false
+  }
+}

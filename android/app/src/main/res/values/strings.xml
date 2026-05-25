@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SpotiDown</string>
+    <string name="title_activity_main">SpotiDown</string>
+    <string name="package_name">com.kcbyk.spotidown</string>
+    <string name="custom_url_scheme">com.kcbyk.spotidown</string>
+</resources>
