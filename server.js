@@ -90,11 +90,9 @@ async function ensureYtDlpCookiesFile() {
   const cookieFile = path.join(CACHE_ROOT, 'yt-cookies.txt');
   await fsp.mkdir(CACHE_ROOT, { recursive: true });
 
-  if (!await fileExists(cookieFile)) {
-    const decoded = Buffer.from(jsonB64 || b64, 'base64').toString('utf8');
-    const netscape = jsonB64 ? cookiesJsonToNetscape(decoded) : null;
-    await fsp.writeFile(cookieFile, netscape || decoded, 'utf8');
-  }
+  const decoded = Buffer.from(jsonB64 || b64, 'base64').toString('utf8');
+  const netscape = jsonB64 ? cookiesJsonToNetscape(decoded) : null;
+  await fsp.writeFile(cookieFile, netscape || decoded, 'utf8');
 
   ytDlpCookiesResolvedPath = cookieFile;
   return ytDlpCookiesResolvedPath;
@@ -1053,4 +1051,11 @@ app.get('/api/download', async (req, res) => {
 // Start Server
 app.listen(PORT, () => {
   console.log(`Sunucu başlatıldı: http://localhost:${PORT}`);
+  ensureYtDlpCookiesFile()
+    .then((cookiePath) => {
+      console.log(`yt-dlp cookies: ${cookiePath ? 'enabled' : 'disabled'}`);
+    })
+    .catch((err) => {
+      console.log(`yt-dlp cookies: error (${err?.message || 'unknown'})`);
+    });
 });
