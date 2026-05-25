@@ -905,6 +905,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const song = getStudioSong();
     if (!song || !playerAudio) return;
 
+    playerAudio.crossOrigin = 'anonymous';
     playerAudio.dataset.webAudioSafe = '1';
     playerAudio.src = getPlaybackUrl(song);
     playerAudio.load();
@@ -940,9 +941,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const streamParams = new URLSearchParams({
         id: song.youtubeId,
+        format: 'm4a',
+        play: '1',
         title: titleClean
       });
-      return `/api/stream?${streamParams.toString()}`;
+      return `/api/download?${streamParams.toString()}`;
     }
 
     const params = new URLSearchParams({

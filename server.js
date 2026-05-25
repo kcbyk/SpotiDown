@@ -811,6 +811,25 @@ app.get('/api/download', async (req, res) => {
   
   let ytDlpProcess = null;
   let ffmpegProcess = null;
+  let responseStarted = false;
+
+  const startResponseOnce = (headers) => {
+    if (responseStarted) return;
+    responseStarted = true;
+    Object.entries(headers || {}).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) res.setHeader(key, value);
+    });
+  };
+
+  const streamWithDeferredHeaders = (readable, headers) => {
+    const onFirstData = (chunk) => {
+      startResponseOnce(headers);
+      res.write(chunk);
+      readable.off('data', onFirstData);
+      readable.pipe(res);
+    };
+    readable.on('data', onFirstData);
+  };
 
   try {
     if (useAiStems) {
@@ -832,26 +851,27 @@ app.get('/api/download', async (req, res) => {
 
       ffmpegArgs.push('-vn');
 
+      const downloadHeaders = {};
       if (isInlinePlayback) {
         ffmpegArgs.push('-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', 'pipe:1');
-        res.setHeader('Content-Type', 'audio/mpeg');
-        res.setHeader('Cache-Control', 'no-store');
+        downloadHeaders['Content-Type'] = 'audio/mpeg';
+        downloadHeaders['Cache-Control'] = 'no-store';
       } else if (isWav) {
         ffmpegArgs.push('-f', 'wav', 'pipe:1');
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.wav"`);
-        res.setHeader('Content-Type', 'audio/wav');
+        downloadHeaders['Content-Disposition'] = `attachment; filename="${encodeURIComponent(filename)}.wav"`;
+        downloadHeaders['Content-Type'] = 'audio/wav';
       } else {
         ffmpegArgs.push('-c:a', 'aac', '-b:a', '256k', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.m4a"`);
-        res.setHeader('Content-Type', 'audio/mp4');
+        downloadHeaders['Content-Disposition'] = `attachment; filename="${encodeURIComponent(filename)}.m4a"`;
+        downloadHeaders['Content-Type'] = 'audio/mp4';
       }
 
       ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, { windowsHide: true });
-      ffmpegProcess.stdout.pipe(res);
+      streamWithDeferredHeaders(ffmpegProcess.stdout, downloadHeaders);
 
       ffmpegProcess.on('error', (err) => {
         console.error('AI ffmpeg hata:', err);
-        if (!res.headersSent) res.status(500).send('AI stem işlenemedi.');
+        if (!responseStarted && !res.headersSent) res.status(500).send('AI stem işlenemedi.');
       });
 
       ffmpegProcess.stderr.on('data', (chunk) => {
@@ -880,18 +900,19 @@ app.get('/api/download', async (req, res) => {
 
     ffmpegArgs.push('-vn');
 
+    const downloadHeaders = {};
     if (isInlinePlayback) {
       ffmpegArgs.push('-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', 'pipe:1');
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Cache-Control', 'no-store');
+      downloadHeaders['Content-Type'] = 'audio/mpeg';
+      downloadHeaders['Cache-Control'] = 'no-store';
     } else if (isWav) {
       ffmpegArgs.push('-f', 'wav', 'pipe:1');
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.wav"`);
-      res.setHeader('Content-Type', 'audio/wav');
+      downloadHeaders['Content-Disposition'] = `attachment; filename="${encodeURIComponent(filename)}.wav"`;
+      downloadHeaders['Content-Type'] = 'audio/wav';
     } else {
       ffmpegArgs.push('-c:a', 'aac', '-b:a', '256k', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.m4a"`);
-      res.setHeader('Content-Type', 'audio/mp4');
+      downloadHeaders['Content-Disposition'] = `attachment; filename="${encodeURIComponent(filename)}.m4a"`;
+      downloadHeaders['Content-Type'] = 'audio/mp4';
     }
 
     ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, { windowsHide: true });
@@ -901,7 +922,7 @@ app.get('/api/download', async (req, res) => {
     ffmpegProcess.stdin.on('error', (err) => console.error('ffmpeg stdin pipe error:', err));
     
     ytDlpProcess.stdout.pipe(ffmpegProcess.stdin);
-    ffmpegProcess.stdout.pipe(res);
+    streamWithDeferredHeaders(ffmpegProcess.stdout, downloadHeaders);
 
     ytDlpProcess.stderr.on('data', (chunk) => {
       ytdlpStderr += chunk.toString();
@@ -916,7 +937,7 @@ app.get('/api/download', async (req, res) => {
     ytDlpProcess.on('close', (code) => {
       if (code === 0) return;
       console.error('yt-dlp exit:', code, ytdlpStderr.slice(-2000));
-      if (!res.headersSent) {
+      if (!responseStarted && !res.headersSent) {
         res.status(502).json({ success: false, error: 'YouTube indirme başarısız oldu.', detail: ytdlpStderr.slice(-1200) });
       } else {
         res.destroy();
@@ -927,7 +948,7 @@ app.get('/api/download', async (req, res) => {
     ffmpegProcess.on('close', (code) => {
       if (code === 0) return;
       console.error('ffmpeg exit:', code, ffmpegStderr.slice(-2000));
-      if (!res.headersSent) {
+      if (!responseStarted && !res.headersSent) {
         res.status(502).json({ success: false, error: 'Ses dönüştürme başarısız oldu.', detail: ffmpegStderr.slice(-1200) });
       } else {
         res.destroy();
