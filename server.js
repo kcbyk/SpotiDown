@@ -43,6 +43,38 @@ const YTDLP_COMMON_ARGS = [
   '--add-header', 'Referer:https://www.youtube.com/'
 ];
 
+let ytDlpCookiesResolvedPath = null;
+
+async function ensureYtDlpCookiesFile() {
+  if (ytDlpCookiesResolvedPath) return ytDlpCookiesResolvedPath;
+
+  const envPath = typeof process.env.YTDLP_COOKIES === 'string' ? process.env.YTDLP_COOKIES.trim() : '';
+  if (envPath) {
+    ytDlpCookiesResolvedPath = envPath;
+    return ytDlpCookiesResolvedPath;
+  }
+
+  const b64 = typeof process.env.YTDLP_COOKIES_B64 === 'string' ? process.env.YTDLP_COOKIES_B64.trim() : '';
+  if (!b64) return null;
+
+  const cookieFile = path.join(CACHE_ROOT, 'yt-cookies.txt');
+  await fsp.mkdir(CACHE_ROOT, { recursive: true });
+
+  if (!await fileExists(cookieFile)) {
+    const decoded = Buffer.from(b64, 'base64').toString('utf8');
+    await fsp.writeFile(cookieFile, decoded, 'utf8');
+  }
+
+  ytDlpCookiesResolvedPath = cookieFile;
+  return ytDlpCookiesResolvedPath;
+}
+
+async function buildYtDlpArgs(args) {
+  const cookiesPath = await ensureYtDlpCookiesFile();
+  const cookieArgs = cookiesPath ? ['--cookies', cookiesPath] : [];
+  return [...YTDLP_COMMON_ARGS, ...cookieArgs, ...args];
+}
+
 function safeYoutubeId(id) {
   return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
 }
@@ -185,72 +217,75 @@ async function runPythonProcess(args, options) {
 
 function downloadYoutubeAudioToWav(videoUrl, outputPath) {
   return new Promise((resolve, reject) => {
-    const dlp = spawn(YTDLP_PATH, ['-f', 'bestaudio', '-o', '-', videoUrl], {
-      cwd: __dirname,
-      windowsHide: true
-    });
+    (async () => {
+      const dlpArgs = await buildYtDlpArgs(['-f', YTDLP_AUDIO_FORMAT, '-o', '-', videoUrl]);
+      const dlp = spawn(YTDLP_PATH, dlpArgs, {
+        cwd: __dirname,
+        windowsHide: true
+      });
 
-    const ffmpeg = spawn(FFMPEG_PATH, [
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-i', 'pipe:0',
-      '-vn',
-      '-ar', '44100',
-      '-ac', '2',
-      '-f', 'wav',
-      outputPath
-    ], {
-      cwd: __dirname,
-      windowsHide: true
-    });
+      const ffmpeg = spawn(FFMPEG_PATH, [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', 'pipe:0',
+        '-vn',
+        '-ar', '44100',
+        '-ac', '2',
+        '-f', 'wav',
+        outputPath
+      ], {
+        cwd: __dirname,
+        windowsHide: true
+      });
 
-    let settled = false;
-    let dlpError = '';
-    let ffmpegError = '';
-    let dlpClosed = false;
+      let settled = false;
+      let dlpError = '';
+      let ffmpegError = '';
+      let dlpClosed = false;
 
-    const finish = (err) => {
-      if (settled) return;
-      settled = true;
-      if (err) reject(err);
-      else resolve();
-    };
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve();
+      };
 
-    dlp.stderr.on('data', (chunk) => {
-      dlpError += chunk.toString();
-    });
-    ffmpeg.stderr.on('data', (chunk) => {
-      ffmpegError += chunk.toString();
-    });
-    ffmpeg.stdin.on('error', () => {});
+      dlp.stderr.on('data', (chunk) => {
+        dlpError += chunk.toString();
+      });
+      ffmpeg.stderr.on('data', (chunk) => {
+        ffmpegError += chunk.toString();
+      });
+      ffmpeg.stdin.on('error', () => {});
 
-    dlp.stdout.pipe(ffmpeg.stdin);
+      dlp.stdout.pipe(ffmpeg.stdin);
 
-    dlp.on('error', finish);
-    ffmpeg.on('error', finish);
+      dlp.on('error', finish);
+      ffmpeg.on('error', finish);
 
-    dlp.on('close', (code) => {
-      dlpClosed = true;
-      if (code !== 0) {
-        if (!ffmpeg.killed) ffmpeg.kill();
-        finish(new Error(dlpError.slice(-2500) || 'YouTube sesi indirilemedi.'));
-      }
-    });
+      dlp.on('close', (code) => {
+        dlpClosed = true;
+        if (code !== 0) {
+          if (!ffmpeg.killed) ffmpeg.kill();
+          finish(new Error(dlpError.slice(-2500) || 'YouTube sesi indirilemedi.'));
+        }
+      });
 
-    ffmpeg.on('close', (code) => {
-      if (code !== 0) {
-        finish(new Error(ffmpegError.slice(-2500) || 'Ses WAV formatına çevrilemedi.'));
-      } else if (dlpClosed) {
-        finish();
-      } else {
-        const waitForDlp = setInterval(() => {
-          if (dlpClosed) {
-            clearInterval(waitForDlp);
-            finish();
-          }
-        }, 50);
-      }
-    });
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          finish(new Error(ffmpegError.slice(-2500) || 'Ses WAV formatına çevrilemedi.'));
+        } else if (dlpClosed) {
+          finish();
+        } else {
+          const waitForDlp = setInterval(() => {
+            if (dlpClosed) {
+              clearInterval(waitForDlp);
+              finish();
+            }
+          }, 50);
+        }
+      });
+    })().catch(reject);
   });
 }
 
@@ -334,51 +369,54 @@ async function ensureAiStems(id) {
 // Helper: Run yt-dlp to get track details from YouTube
 function getYoutubeInfo(url) {
   return new Promise((resolve, reject) => {
-    execFile(YTDLP_PATH, [...YTDLP_COMMON_ARGS, '-f', YTDLP_AUDIO_FORMAT, '-j', url], (error, stdout, stderr) => {
-      try {
-        const info = JSON.parse(stdout);
-        const audioFormat = Array.isArray(info.formats)
-          ? info.formats
-              .filter(format => format.url && format.vcodec === 'none')
-              .sort((a, b) => {
-                const score = (format) => {
-                  const abr = Number(format.abr || format.tbr || 0);
-                  const ext = String(format.ext || '').toLowerCase();
-                  const acodec = String(format.acodec || '').toLowerCase();
-                  const containerBonus = (ext === 'm4a' || ext === 'mp4') ? 2000 : 0;
-                  const codecBonus = (acodec.includes('mp4a') || acodec.includes('aac')) ? 1200 : 0;
-                  const httpsBonus = String(format.protocol || '').toLowerCase().includes('https') ? 50 : 0;
-                  return containerBonus + codecBonus + httpsBonus + abr;
-                };
-                return score(b) - score(a);
-              })[0]
-          : null;
-        
-        let durationFormatted = 'Bilinmiyor';
-        if (info.duration) {
-          durationFormatted = new Date(parseInt(info.duration) * 1000).toISOString().substr(14, 5);
-        }
+    (async () => {
+      const args = await buildYtDlpArgs(['-f', YTDLP_AUDIO_FORMAT, '-j', url]);
+      execFile(YTDLP_PATH, args, (error, stdout, stderr) => {
+        try {
+          const info = JSON.parse(stdout);
+          const audioFormat = Array.isArray(info.formats)
+            ? info.formats
+                .filter(format => format.url && format.vcodec === 'none')
+                .sort((a, b) => {
+                  const score = (format) => {
+                    const abr = Number(format.abr || format.tbr || 0);
+                    const ext = String(format.ext || '').toLowerCase();
+                    const acodec = String(format.acodec || '').toLowerCase();
+                    const containerBonus = (ext === 'm4a' || ext === 'mp4') ? 2000 : 0;
+                    const codecBonus = (acodec.includes('mp4a') || acodec.includes('aac')) ? 1200 : 0;
+                    const httpsBonus = String(format.protocol || '').toLowerCase().includes('https') ? 50 : 0;
+                    return containerBonus + codecBonus + httpsBonus + abr;
+                  };
+                  return score(b) - score(a);
+                })[0]
+            : null;
 
-        resolve({
-          title: info.title,
-          artist: info.uploader || info.channel || 'YouTube',
-          thumbnail: info.thumbnail || `https://i.ytimg.com/vi/${info.id}/hqdefault.jpg`,
-          id: info.id,
-          youtubeUrl: `https://www.youtube.com/watch?v=${info.id}`,
-          duration: durationFormatted,
-          streamUrl: audioFormat?.url || info.url || null,
-          streamMime: audioFormat?.mime_type || audioFormat?.ext || null
-        });
-      } catch (err) {
-        if (error) {
-          const tail = String(stderr || '').slice(-1800);
-          const message = tail || error.message || 'YouTube bilgisi alınamadı.';
-          reject(new Error(message));
-          return;
+          let durationFormatted = 'Bilinmiyor';
+          if (info.duration) {
+            durationFormatted = new Date(parseInt(info.duration) * 1000).toISOString().substr(14, 5);
+          }
+
+          resolve({
+            title: info.title,
+            artist: info.uploader || info.channel || 'YouTube',
+            thumbnail: info.thumbnail || `https://i.ytimg.com/vi/${info.id}/hqdefault.jpg`,
+            id: info.id,
+            youtubeUrl: `https://www.youtube.com/watch?v=${info.id}`,
+            duration: durationFormatted,
+            streamUrl: audioFormat?.url || info.url || null,
+            streamMime: audioFormat?.mime_type || audioFormat?.ext || null
+          });
+        } catch (err) {
+          if (error) {
+            const tail = String(stderr || '').slice(-1800);
+            const message = tail || error.message || 'YouTube bilgisi alınamadı.';
+            reject(new Error(message));
+            return;
+          }
+          reject(err);
         }
-        reject(err);
-      }
-    });
+      });
+    })().catch(reject);
   });
 }
 
@@ -885,7 +923,7 @@ app.get('/api/download', async (req, res) => {
       return;
     }
 
-    const dlpArgs = [...YTDLP_COMMON_ARGS, '-f', YTDLP_AUDIO_FORMAT, '-o', '-', videoUrl];
+    const dlpArgs = await buildYtDlpArgs(['-f', YTDLP_AUDIO_FORMAT, '-o', '-', videoUrl]);
     ytDlpProcess = spawn(YTDLP_PATH, dlpArgs, { windowsHide: true });
     let ytdlpStderr = '';
 
