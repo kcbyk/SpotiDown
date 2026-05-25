@@ -1,0 +1,9 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://spotidown-z8k3.onrender.com/api/:path*"
+    }
+  ]
+}
+
