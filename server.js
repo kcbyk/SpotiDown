@@ -17,10 +17,16 @@ app.use(express.static(path.join(__dirname, 'public')));
 const SPOTIFY_TRACK_REGEX = /spotify\.com\/.*track\/([a-zA-Z0-9]+)/;
 const YOUTUBE_URL_REGEX = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
 
-const YTDLP_PATH = path.join(__dirname, 'yt-dlp.exe');
-const FFMPEG_PATH = path.join(__dirname, 'ffmpeg.exe');
-const PROJECT_PYTHON = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
-const PYTHON_BIN = process.env.PYTHON || (fs.existsSync(PROJECT_PYTHON) ? PROJECT_PYTHON : 'python');
+const YTDLP_EXE = path.join(__dirname, 'yt-dlp.exe');
+const FFMPEG_EXE = path.join(__dirname, 'ffmpeg.exe');
+const YTDLP_PATH = fs.existsSync(YTDLP_EXE) ? YTDLP_EXE : 'yt-dlp';
+const FFMPEG_PATH = fs.existsSync(FFMPEG_EXE) ? FFMPEG_EXE : 'ffmpeg';
+const PROJECT_PYTHON_WIN = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
+const PROJECT_PYTHON_POSIX = path.join(__dirname, '.venv', 'bin', 'python');
+const PYTHON_BIN = process.env.PYTHON
+  || (fs.existsSync(PROJECT_PYTHON_WIN) ? PROJECT_PYTHON_WIN : '')
+  || (fs.existsSync(PROJECT_PYTHON_POSIX) ? PROJECT_PYTHON_POSIX : '')
+  || (process.platform === 'win32' ? 'python' : 'python3');
 const CACHE_ROOT = path.join(__dirname, 'cache');
 const STEM_CACHE_ROOT = path.join(CACHE_ROOT, 'stems');
 const aiStemJobs = new Map();
