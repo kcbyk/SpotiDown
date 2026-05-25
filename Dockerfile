@@ -19,7 +19,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 ENV PYTHON="/opt/venv/bin/python"
 
 RUN pip install --no-cache-dir --upgrade pip \
-  && pip install --no-cache-dir yt-dlp \
+  && pip install --no-cache-dir --upgrade yt-dlp \
   && pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
   && pip install --no-cache-dir demucs soundfile
 

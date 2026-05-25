@@ -38,7 +38,7 @@ const YTDLP_COMMON_ARGS = [
   '--geo-bypass',
   '--retries', '3',
   '--fragment-retries', '3',
-  '--extractor-args', 'youtube:player_client=android',
+  '--extractor-args', 'youtube:player_client=android,web',
   '--user-agent', DEFAULT_UA,
   '--add-header', 'Referer:https://www.youtube.com/'
 ];
