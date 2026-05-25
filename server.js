@@ -42,6 +42,7 @@ const YTDLP_COMMON_ARGS = [
   '--user-agent', DEFAULT_UA,
   '--add-header', 'Referer:https://www.youtube.com/'
 ];
+const LOCAL_WORKER_URL = typeof process.env.LOCAL_WORKER_URL === 'string' ? process.env.LOCAL_WORKER_URL.trim().replace(/\/+$/, '') : '';
 
 let ytDlpCookiesResolvedPath = null;
 
@@ -102,6 +103,22 @@ async function buildYtDlpArgs(args) {
   const cookiesPath = await ensureYtDlpCookiesFile();
   const cookieArgs = cookiesPath ? ['--cookies', cookiesPath] : [];
   return [...YTDLP_COMMON_ARGS, ...cookieArgs, ...args];
+}
+
+function isBotCheckError(text) {
+  const hay = String(text || '').toLowerCase();
+  return hay.includes('sign in to confirm') || hay.includes('not a bot') || hay.includes('--cookies-from-browser') || hay.includes('use --cookies');
+}
+
+async function proxyToLocalWorker(targetUrl, res) {
+  const upstream = await fetch(targetUrl, { redirect: 'follow' });
+  res.status(upstream.status);
+  ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'content-range', 'cache-control'].forEach((header) => {
+    const value = upstream.headers.get(header);
+    if (value) res.setHeader(header, value);
+  });
+  if (!upstream.body) return res.end();
+  Readable.fromWeb(upstream.body).pipe(res);
 }
 
 function safeYoutubeId(id) {
@@ -727,6 +744,31 @@ app.post('/api/stems/prepare', async (req, res) => {
   }
 });
 
+app.get('/api/diagnostics', async (_req, res) => {
+  try {
+    const cookiesPath = await ensureYtDlpCookiesFile();
+    const cookiesExists = cookiesPath ? await fileExists(cookiesPath) : false;
+    const cookiesBytes = cookiesExists ? (await fsp.stat(cookiesPath)).size : 0;
+    return res.json({
+      success: true,
+      cookies: {
+        enabled: Boolean(cookiesExists && cookiesBytes > 0),
+        bytes: cookiesBytes
+      },
+      binaries: {
+        ytdlp: YTDLP_PATH,
+        ffmpeg: FFMPEG_PATH,
+        python: PYTHON_BIN
+      },
+      fallback: {
+        localWorkerUrl: LOCAL_WORKER_URL || null
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'Diagnostics error' });
+  }
+});
+
 // API Endpoint: Stream download audio (Supports on-the-fly vocal/instrumental separation via FFmpeg)
 function clampPercent(value, fallback = 100) {
   const parsed = Number.parseFloat(value);
@@ -879,6 +921,7 @@ app.get('/api/download', async (req, res) => {
   let ytDlpProcess = null;
   let ffmpegProcess = null;
   let responseStarted = false;
+  let fallbackTaken = false;
 
   const startResponseOnce = (headers) => {
     if (responseStarted) return;
@@ -1004,6 +1047,23 @@ app.get('/api/download', async (req, res) => {
     ytDlpProcess.on('close', (code) => {
       if (code === 0) return;
       console.error('yt-dlp exit:', code, ytdlpStderr.slice(-2000));
+      if (!fallbackTaken && !responseStarted && !res.headersSent && LOCAL_WORKER_URL && isBotCheckError(ytdlpStderr)) {
+        fallbackTaken = true;
+        if (ytDlpProcess && !ytDlpProcess.killed) ytDlpProcess.kill();
+        if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill();
+        (async () => {
+          const url = new URL('/api/download', LOCAL_WORKER_URL);
+          Object.entries(req.query || {}).forEach(([key, value]) => {
+            if (value === undefined || value === null) return;
+            url.searchParams.set(key, String(value));
+          });
+          await proxyToLocalWorker(url.toString(), res);
+        })().catch((err) => {
+          console.error('Local worker proxy failed:', err);
+          if (!res.headersSent) res.status(502).json({ success: false, error: 'Local worker bağlantısı başarısız.' });
+        });
+        return;
+      }
       if (!responseStarted && !res.headersSent) {
         res.status(502).json({ success: false, error: 'YouTube indirme başarısız oldu.', detail: ytdlpStderr.slice(-1200) });
       } else {
@@ -1015,6 +1075,10 @@ app.get('/api/download', async (req, res) => {
     ffmpegProcess.on('close', (code) => {
       if (code === 0) return;
       console.error('ffmpeg exit:', code, ffmpegStderr.slice(-2000));
+      if (fallbackTaken) {
+        if (ytDlpProcess && !ytDlpProcess.killed) ytDlpProcess.kill();
+        return;
+      }
       if (!responseStarted && !res.headersSent) {
         res.status(502).json({ success: false, error: 'Ses dönüştürme başarısız oldu.', detail: ffmpegStderr.slice(-1200) });
       } else {

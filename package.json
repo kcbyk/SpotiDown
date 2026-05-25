@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "local-worker": "node scripts/local_worker.js"
   },
   "dependencies": {
     "@capacitor/android": "^8.3.4",
