@@ -14,8 +14,8 @@ app.use(express.json());
 const ROOT = path.join(__dirname, '..');
 const YTDLP_EXE = path.join(ROOT, 'yt-dlp.exe');
 const FFMPEG_EXE = path.join(ROOT, 'ffmpeg.exe');
-const YTDLP = fs.existsSync(YTDLP_EXE) ? YTDLP_EXE : 'yt-dlp';
-const FFMPEG = fs.existsSync(FFMPEG_EXE) ? FFMPEG_EXE : 'ffmpeg';
+let YTDLP = fs.existsSync(YTDLP_EXE) ? YTDLP_EXE : 'yt-dlp';
+let FFMPEG = fs.existsSync(FFMPEG_EXE) ? FFMPEG_EXE : 'ffmpeg';
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const YTDLP_AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
@@ -24,7 +24,27 @@ const cookiesFromBrowser = typeof process.env.COOKIES_FROM_BROWSER === 'string'
   ? process.env.COOKIES_FROM_BROWSER.trim()
   : 'chrome';
 
-function spawnYtDlp(args) {
+async function ensureYtDlp() {
+  if (fs.existsSync(YTDLP_EXE)) {
+    YTDLP = YTDLP_EXE;
+    return YTDLP;
+  }
+
+  if (process.platform !== 'win32') return YTDLP;
+
+  const url = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`yt-dlp indirilemedi (${response.status}).`);
+  }
+  const data = Buffer.from(await response.arrayBuffer());
+  await fs.promises.writeFile(YTDLP_EXE, data);
+  YTDLP = YTDLP_EXE;
+  return YTDLP;
+}
+
+async function spawnYtDlp(args) {
+  await ensureYtDlp();
   const base = [
     '--no-warnings',
     '--no-playlist',
@@ -39,7 +59,8 @@ function spawnYtDlp(args) {
   return spawn(YTDLP, [...base, ...args], { cwd: ROOT, windowsHide: true });
 }
 
-function execYtDlpJson(args) {
+async function execYtDlpJson(args) {
+  await ensureYtDlp();
   const base = [
     '--no-warnings',
     '--no-playlist',
@@ -67,6 +88,21 @@ function execYtDlpJson(args) {
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+app.get('/diagnostics', async (_req, res) => {
+  try {
+    const ytdlpPath = await ensureYtDlp();
+    const ffmpegPath = fs.existsSync(FFMPEG_EXE) ? FFMPEG_EXE : 'ffmpeg';
+    return res.json({
+      ok: true,
+      ytdlp: ytdlpPath,
+      ffmpeg: ffmpegPath,
+      cookiesFromBrowser
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || 'diagnostics error' });
+  }
+});
 
 app.get('/api/info', async (req, res) => {
   const query = String(req.query.query || '').trim();
@@ -106,7 +142,12 @@ app.get('/api/download', async (req, res) => {
   const title = String(req.query.title || 'download').replace(/[\\\/:\*\?"<>\|]/g, '').trim();
   const videoUrl = `https://www.youtube.com/watch?v=${id}`;
 
-  const yt = spawnYtDlp(['-f', YTDLP_AUDIO_FORMAT, '-o', '-', videoUrl]);
+  let yt;
+  try {
+    yt = await spawnYtDlp(['-f', YTDLP_AUDIO_FORMAT, '-o', '-', videoUrl]);
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'yt-dlp başlatılamadı.' });
+  }
   let ytErr = '';
   yt.stderr.on('data', (c) => { ytErr = (ytErr + c.toString()).slice(-20000); });
 
@@ -115,10 +156,30 @@ app.get('/api/download', async (req, res) => {
     return res.status(502).json({ success: false, error: message, detail });
   };
 
+  yt.on('error', (err) => {
+    sendError('yt-dlp çalıştırılamadı.', err.message);
+  });
+
   if (play) {
+    const ffmpegAvailable = fs.existsSync(FFMPEG_EXE);
+    if (ffmpegAvailable) {
+      FFMPEG = FFMPEG_EXE;
+    }
+
+    if (!ffmpegAvailable) {
+      res.setHeader('Content-Type', 'audio/mp4');
+      res.setHeader('Cache-Control', 'no-store');
+      yt.stdout.pipe(res);
+      yt.on('close', (code) => { if (code !== 0) sendError('YouTube indirme başarısız oldu.', ytErr.slice(-1200)); });
+      return;
+    }
+
     const ff = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', 'pipe:1'], { cwd: ROOT, windowsHide: true });
     let ffErr = '';
     ff.stderr.on('data', (c) => { ffErr = (ffErr + c.toString()).slice(-20000); });
+    ff.on('error', (err) => {
+      sendError('ffmpeg çalıştırılamadı.', err.message);
+    });
     yt.stdout.pipe(ff.stdin);
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Cache-Control', 'no-store');
@@ -129,9 +190,19 @@ app.get('/api/download', async (req, res) => {
   }
 
   if (format === 'wav') {
+    const ffmpegAvailable = fs.existsSync(FFMPEG_EXE);
+    if (ffmpegAvailable) {
+      FFMPEG = FFMPEG_EXE;
+    }
+    if (!ffmpegAvailable) {
+      return res.status(500).json({ success: false, error: 'WAV için ffmpeg.exe gerekli. Aynı klasöre ffmpeg.exe koy veya format=m4a kullan.' });
+    }
     const ff = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-vn', '-f', 'wav', 'pipe:1'], { cwd: ROOT, windowsHide: true });
     let ffErr = '';
     ff.stderr.on('data', (c) => { ffErr = (ffErr + c.toString()).slice(-20000); });
+    ff.on('error', (err) => {
+      sendError('ffmpeg çalıştırılamadı.', err.message);
+    });
     yt.stdout.pipe(ff.stdin);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(title)}.wav"`);
     res.setHeader('Content-Type', 'audio/wav');
@@ -150,4 +221,3 @@ app.get('/api/download', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Local worker started: http://localhost:${PORT}`);
 });
-
