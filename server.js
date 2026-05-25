@@ -30,6 +30,18 @@ const PYTHON_BIN = process.env.PYTHON
 const CACHE_ROOT = path.join(__dirname, 'cache');
 const STEM_CACHE_ROOT = path.join(CACHE_ROOT, 'stems');
 const aiStemJobs = new Map();
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const YTDLP_AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio';
+const YTDLP_COMMON_ARGS = [
+  '--no-warnings',
+  '--no-playlist',
+  '--geo-bypass',
+  '--retries', '3',
+  '--fragment-retries', '3',
+  '--extractor-args', 'youtube:player_client=android',
+  '--user-agent', DEFAULT_UA,
+  '--add-header', 'Referer:https://www.youtube.com/'
+];
 
 function safeYoutubeId(id) {
   return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
@@ -322,13 +334,24 @@ async function ensureAiStems(id) {
 // Helper: Run yt-dlp to get track details from YouTube
 function getYoutubeInfo(url) {
   return new Promise((resolve, reject) => {
-    execFile(YTDLP_PATH, ['--no-warnings', '-f', 'bestaudio', '-j', url], (error, stdout, stderr) => {
+    execFile(YTDLP_PATH, [...YTDLP_COMMON_ARGS, '-f', YTDLP_AUDIO_FORMAT, '-j', url], (error, stdout, stderr) => {
       try {
         const info = JSON.parse(stdout);
         const audioFormat = Array.isArray(info.formats)
           ? info.formats
               .filter(format => format.url && format.vcodec === 'none')
-              .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))[0]
+              .sort((a, b) => {
+                const score = (format) => {
+                  const abr = Number(format.abr || format.tbr || 0);
+                  const ext = String(format.ext || '').toLowerCase();
+                  const acodec = String(format.acodec || '').toLowerCase();
+                  const containerBonus = (ext === 'm4a' || ext === 'mp4') ? 2000 : 0;
+                  const codecBonus = (acodec.includes('mp4a') || acodec.includes('aac')) ? 1200 : 0;
+                  const httpsBonus = String(format.protocol || '').toLowerCase().includes('https') ? 50 : 0;
+                  return containerBonus + codecBonus + httpsBonus + abr;
+                };
+                return score(b) - score(a);
+              })[0]
           : null;
         
         let durationFormatted = 'Bilinmiyor';
@@ -343,10 +366,17 @@ function getYoutubeInfo(url) {
           id: info.id,
           youtubeUrl: `https://www.youtube.com/watch?v=${info.id}`,
           duration: durationFormatted,
-          streamUrl: info.url || audioFormat?.url || null
+          streamUrl: audioFormat?.url || info.url || null,
+          streamMime: audioFormat?.mime_type || audioFormat?.ext || null
         });
       } catch (err) {
-        reject(error || err);
+        if (error) {
+          const tail = String(stderr || '').slice(-1800);
+          const message = tail || error.message || 'YouTube bilgisi alınamadı.';
+          reject(new Error(message));
+          return;
+        }
+        reject(err);
       }
     });
   });
@@ -835,8 +865,9 @@ app.get('/api/download', async (req, res) => {
       return;
     }
 
-    const dlpArgs = ['-f', 'bestaudio', '-o', '-', videoUrl];
-    ytDlpProcess = spawn(YTDLP_PATH, dlpArgs);
+    const dlpArgs = [...YTDLP_COMMON_ARGS, '-f', YTDLP_AUDIO_FORMAT, '-o', '-', videoUrl];
+    ytDlpProcess = spawn(YTDLP_PATH, dlpArgs, { windowsHide: true });
+    let ytdlpStderr = '';
 
     let ffmpegArgs = ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0'];
     const stemFilter = buildStemFilter(stemMode, vocalVol, musicVol, audioEffects);
@@ -863,13 +894,46 @@ app.get('/api/download', async (req, res) => {
       res.setHeader('Content-Type', 'audio/mp4');
     }
 
-    ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs);
+    ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, { windowsHide: true });
+    let ffmpegStderr = '';
 
     ytDlpProcess.stdout.on('error', (err) => console.error('yt-dlp stdout pipe error:', err));
     ffmpegProcess.stdin.on('error', (err) => console.error('ffmpeg stdin pipe error:', err));
     
     ytDlpProcess.stdout.pipe(ffmpegProcess.stdin);
     ffmpegProcess.stdout.pipe(res);
+
+    ytDlpProcess.stderr.on('data', (chunk) => {
+      ytdlpStderr += chunk.toString();
+      if (ytdlpStderr.length > 20000) ytdlpStderr = ytdlpStderr.slice(-20000);
+    });
+
+    ffmpegProcess.stderr.on('data', (chunk) => {
+      ffmpegStderr += chunk.toString();
+      if (ffmpegStderr.length > 20000) ffmpegStderr = ffmpegStderr.slice(-20000);
+    });
+
+    ytDlpProcess.on('close', (code) => {
+      if (code === 0) return;
+      console.error('yt-dlp exit:', code, ytdlpStderr.slice(-2000));
+      if (!res.headersSent) {
+        res.status(502).json({ success: false, error: 'YouTube indirme başarısız oldu.', detail: ytdlpStderr.slice(-1200) });
+      } else {
+        res.destroy();
+      }
+      if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill();
+    });
+
+    ffmpegProcess.on('close', (code) => {
+      if (code === 0) return;
+      console.error('ffmpeg exit:', code, ffmpegStderr.slice(-2000));
+      if (!res.headersSent) {
+        res.status(502).json({ success: false, error: 'Ses dönüştürme başarısız oldu.', detail: ffmpegStderr.slice(-1200) });
+      } else {
+        res.destroy();
+      }
+      if (ytDlpProcess && !ytDlpProcess.killed) ytDlpProcess.kill();
+    });
 
     ytDlpProcess.on('error', (err) => {
       console.error('yt-dlp hata:', err);
