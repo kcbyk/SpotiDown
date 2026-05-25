@@ -1,0 +1,896 @@
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const fsp = require('fs/promises');
+const { execFile, spawn } = require('child_process');
+const { Readable } = require('stream');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Regex patterns
+const SPOTIFY_TRACK_REGEX = /spotify\.com\/.*track\/([a-zA-Z0-9]+)/;
+const YOUTUBE_URL_REGEX = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+
+const YTDLP_PATH = path.join(__dirname, 'yt-dlp.exe');
+const FFMPEG_PATH = path.join(__dirname, 'ffmpeg.exe');
+const PROJECT_PYTHON = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
+const PYTHON_BIN = process.env.PYTHON || (fs.existsSync(PROJECT_PYTHON) ? PROJECT_PYTHON : 'python');
+const CACHE_ROOT = path.join(__dirname, 'cache');
+const STEM_CACHE_ROOT = path.join(CACHE_ROOT, 'stems');
+const aiStemJobs = new Map();
+
+function safeYoutubeId(id) {
+  return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+}
+
+async function fileExists(filePath) {
+  try {
+    await fsp.access(filePath, fs.constants.F_OK);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function getAiStemPaths(id) {
+  const cleanId = safeYoutubeId(id);
+  const root = path.join(STEM_CACHE_ROOT, cleanId);
+  return {
+    cleanId,
+    root,
+    sourceWav: path.join(root, 'source.wav'),
+    output: path.join(root, 'ai'),
+    vocals: path.join(root, 'ai', 'vocals.wav'),
+    instrumental: path.join(root, 'ai', 'instrumental.wav'),
+    status: path.join(root, 'status.json')
+  };
+}
+
+async function writeAiStemStatus(id, state, message, extra = {}) {
+  const paths = getAiStemPaths(id);
+  if (!paths.cleanId) return null;
+
+  const status = {
+    id: paths.cleanId,
+    state,
+    message,
+    updatedAt: Date.now(),
+    ...extra
+  };
+
+  await fsp.mkdir(paths.root, { recursive: true });
+  await fsp.writeFile(paths.status, JSON.stringify(status, null, 2), 'utf8');
+  return status;
+}
+
+async function readAiStemStatus(id) {
+  const paths = getAiStemPaths(id);
+  if (!paths.cleanId) {
+    return { state: 'error', message: 'Geçersiz video ID.' };
+  }
+
+  if (await fileExists(paths.vocals) && await fileExists(paths.instrumental)) {
+    return {
+      id: paths.cleanId,
+      state: 'ready',
+      message: 'AI vokal ve beat hazır.',
+      ready: true,
+      updatedAt: Date.now()
+    };
+  }
+
+  if (await fileExists(paths.status)) {
+    try {
+      const raw = await fsp.readFile(paths.status, 'utf8');
+      return { ready: false, ...JSON.parse(raw) };
+    } catch (_) {}
+  }
+
+  return {
+    id: paths.cleanId,
+    state: aiStemJobs.has(paths.cleanId) ? 'processing' : 'idle',
+    message: aiStemJobs.has(paths.cleanId) ? 'AI ayırma devam ediyor.' : 'AI ayırma henüz yapılmadı.',
+    ready: false
+  };
+}
+
+function runProcess(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: __dirname,
+      windowsHide: true,
+      ...options
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    if (child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (options.onStdout) options.onStdout(text);
+      });
+    }
+
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        const text = chunk.toString();
+        stderr += text;
+        if (options.onStderr) options.onStderr(text);
+      });
+    }
+
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(stderr.slice(-2500) || `${command} ${code} koduyla kapandı.`));
+      }
+    });
+  });
+}
+
+async function runPythonProcess(args, options) {
+  const candidates = [];
+  const override = typeof process.env.PYTHON === 'string' ? process.env.PYTHON.trim() : '';
+  if (override) candidates.push({ cmd: override, prefix: [] });
+  if (PYTHON_BIN && PYTHON_BIN !== override) candidates.push({ cmd: PYTHON_BIN, prefix: [] });
+  candidates.push({ cmd: 'python', prefix: [] });
+  candidates.push({ cmd: 'py', prefix: ['-3'] });
+  candidates.push({ cmd: 'py', prefix: [] });
+  candidates.push({ cmd: 'python3', prefix: [] });
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      return await runProcess(candidate.cmd, [...candidate.prefix, ...args], options);
+    } catch (error) {
+      lastError = error;
+      if (error && error.code === 'ENOENT') continue;
+      throw error;
+    }
+  }
+
+  const details = lastError && lastError.message ? ` (${lastError.message})` : '';
+  throw new Error(
+    `Python bulunamadı. Python 3 kurup PATH'e ekleyin veya sunucuyu "PYTHON" ortam değişkeni ile başlatın.${details}`
+  );
+}
+
+function downloadYoutubeAudioToWav(videoUrl, outputPath) {
+  return new Promise((resolve, reject) => {
+    const dlp = spawn(YTDLP_PATH, ['-f', 'bestaudio', '-o', '-', videoUrl], {
+      cwd: __dirname,
+      windowsHide: true
+    });
+
+    const ffmpeg = spawn(FFMPEG_PATH, [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-i', 'pipe:0',
+      '-vn',
+      '-ar', '44100',
+      '-ac', '2',
+      '-f', 'wav',
+      outputPath
+    ], {
+      cwd: __dirname,
+      windowsHide: true
+    });
+
+    let settled = false;
+    let dlpError = '';
+    let ffmpegError = '';
+    let dlpClosed = false;
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+
+    dlp.stderr.on('data', (chunk) => {
+      dlpError += chunk.toString();
+    });
+    ffmpeg.stderr.on('data', (chunk) => {
+      ffmpegError += chunk.toString();
+    });
+    ffmpeg.stdin.on('error', () => {});
+
+    dlp.stdout.pipe(ffmpeg.stdin);
+
+    dlp.on('error', finish);
+    ffmpeg.on('error', finish);
+
+    dlp.on('close', (code) => {
+      dlpClosed = true;
+      if (code !== 0) {
+        if (!ffmpeg.killed) ffmpeg.kill();
+        finish(new Error(dlpError.slice(-2500) || 'YouTube sesi indirilemedi.'));
+      }
+    });
+
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) {
+        finish(new Error(ffmpegError.slice(-2500) || 'Ses WAV formatına çevrilemedi.'));
+      } else if (dlpClosed) {
+        finish();
+      } else {
+        const waitForDlp = setInterval(() => {
+          if (dlpClosed) {
+            clearInterval(waitForDlp);
+            finish();
+          }
+        }, 50);
+      }
+    });
+  });
+}
+
+async function runDemucsSeparation(id, inputPath, outputDir) {
+  const scriptPath = path.join(__dirname, 'scripts', 'demucs_separate.py');
+  let buffered = '';
+
+  await runPythonProcess([scriptPath, inputPath, outputDir, '--segment', '7'], {
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONUTF8: '1',
+      PATH: `${__dirname}${path.delimiter}${process.env.PATH || ''}`
+    },
+    onStdout: (text) => {
+      buffered += text;
+      const lines = buffered.split(/\r?\n/);
+      buffered = lines.pop() || '';
+
+      lines.forEach((line) => {
+        if (!line.trim()) return;
+        try {
+          const event = JSON.parse(line);
+          if (event.state && event.message) {
+            writeAiStemStatus(id, event.state, event.message).catch((err) => {
+              console.error('AI status write failed:', err);
+            });
+          }
+        } catch (_) {}
+      });
+    }
+  });
+}
+
+async function ensureAiStems(id) {
+  const paths = getAiStemPaths(id);
+  if (!paths.cleanId) {
+    throw new Error('Geçerli bir video ID bulunamadı.');
+  }
+
+  if (await fileExists(paths.vocals) && await fileExists(paths.instrumental)) {
+    await writeAiStemStatus(paths.cleanId, 'ready', 'AI vokal ve beat hazır.', { ready: true });
+    return paths;
+  }
+
+  if (aiStemJobs.has(paths.cleanId)) {
+    return aiStemJobs.get(paths.cleanId);
+  }
+
+  const job = (async () => {
+    const videoUrl = `https://www.youtube.com/watch?v=${paths.cleanId}`;
+    await fsp.mkdir(paths.output, { recursive: true });
+
+    if (!await fileExists(paths.sourceWav)) {
+      await writeAiStemStatus(paths.cleanId, 'downloading', 'Şarkı AI için indiriliyor.');
+      await downloadYoutubeAudioToWav(videoUrl, paths.sourceWav);
+    }
+
+    await writeAiStemStatus(paths.cleanId, 'separating', 'AI vokal ve beat ayırıyor. İlk işlem biraz sürebilir.');
+    await runDemucsSeparation(paths.cleanId, paths.sourceWav, paths.output);
+
+    if (!await fileExists(paths.vocals) || !await fileExists(paths.instrumental)) {
+      throw new Error('AI stem dosyaları üretilemedi.');
+    }
+
+    await writeAiStemStatus(paths.cleanId, 'ready', 'AI vokal ve beat hazır.', { ready: true });
+    return paths;
+  })()
+    .catch(async (error) => {
+      await writeAiStemStatus(paths.cleanId, 'error', error.message || 'AI ayırma başarısız oldu.');
+      throw error;
+    })
+    .finally(() => {
+      aiStemJobs.delete(paths.cleanId);
+    });
+
+  aiStemJobs.set(paths.cleanId, job);
+  return job;
+}
+
+// Helper: Run yt-dlp to get track details from YouTube
+function getYoutubeInfo(url) {
+  return new Promise((resolve, reject) => {
+    execFile(YTDLP_PATH, ['--no-warnings', '-f', 'bestaudio', '-j', url], (error, stdout, stderr) => {
+      try {
+        const info = JSON.parse(stdout);
+        const audioFormat = Array.isArray(info.formats)
+          ? info.formats
+              .filter(format => format.url && format.vcodec === 'none')
+              .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))[0]
+          : null;
+        
+        let durationFormatted = 'Bilinmiyor';
+        if (info.duration) {
+          durationFormatted = new Date(parseInt(info.duration) * 1000).toISOString().substr(14, 5);
+        }
+
+        resolve({
+          title: info.title,
+          artist: info.uploader || info.channel || 'YouTube',
+          thumbnail: info.thumbnail || `https://i.ytimg.com/vi/${info.id}/hqdefault.jpg`,
+          id: info.id,
+          youtubeUrl: `https://www.youtube.com/watch?v=${info.id}`,
+          duration: durationFormatted,
+          streamUrl: info.url || audioFormat?.url || null
+        });
+      } catch (err) {
+        reject(error || err);
+      }
+    });
+  });
+}
+
+// Helper: YouTube Search Scraper
+async function searchYouTube(query) {
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D`;
+  
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error('YouTube arama isteği başarısız oldu.');
+    }
+
+    const html = await response.text();
+    const regex = /var ytInitialData = ({.*?});/;
+    const match = html.match(regex);
+    
+    if (!match) {
+      const fallbackMatch = html.match(/"videoRenderer":\s*{"videoId":"([^"]+)"/);
+      if (fallbackMatch) {
+        const fallbackId = fallbackMatch[1];
+        return {
+          id: fallbackId,
+          url: `https://www.youtube.com/watch?v=${fallbackId}`,
+          title: query,
+          thumbnail: `https://i.ytimg.com/vi/${fallbackId}/hqdefault.jpg`,
+          duration: 'Bilinmiyor',
+          author: 'YouTube'
+        };
+      }
+      throw new Error('Arama sonuçları çözümlenemedi.');
+    }
+
+    const data = JSON.parse(match[1]);
+    const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents;
+    
+    if (!contents || contents.length === 0) {
+      throw new Error('Arama sonucu bulunamadı.');
+    }
+
+    const videoNode = contents.find(item => item.videoRenderer !== undefined);
+    
+    if (!videoNode || !videoNode.videoRenderer) {
+      throw new Error('Uygun bir video bulunamadı.');
+    }
+
+    const video = videoNode.videoRenderer;
+    
+    return {
+      id: video.videoId,
+      url: `https://www.youtube.com/watch?v=${video.videoId}`,
+      title: video.title.runs[0].text,
+      thumbnail: video.thumbnail?.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`,
+      duration: video.lengthText?.simpleText || 'Bilinmiyor',
+      author: video.ownerText?.runs?.[0]?.text || 'Bilinmiyor'
+    };
+  } catch (error) {
+    console.error('YouTube Arama Hatası:', error);
+    throw error;
+  }
+}
+
+// API Endpoint: Get details from Spotify/YouTube link or search query
+app.get('/api/info', async (req, res) => {
+  const { query } = req.query;
+  
+  if (!query) {
+    return res.status(400).json({ success: false, error: 'Query parametresi bulunamadı.' });
+  }
+
+  try {
+    const trimmedQuery = query.trim();
+
+    // 1. Case: Spotify Link
+    if (SPOTIFY_TRACK_REGEX.test(trimmedQuery)) {
+      const match = trimmedQuery.match(SPOTIFY_TRACK_REGEX);
+      const trackId = match[1];
+      const embedUrl = `https://open.spotify.com/oembed?url=https%3A%2F%2Fopen.spotify.com%2Ftrack%2F${trackId}`;
+      
+      try {
+        const spotifyRes = await fetch(embedUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+        if (!spotifyRes.ok) {
+          throw new Error('oembed response not ok');
+        }
+        
+        const spotifyInfo = await spotifyRes.json();
+        const searchQuery = `${spotifyInfo.title} ${spotifyInfo.author_name || ''} audio`;
+        const ytMatch = await searchYouTube(searchQuery);
+
+        return res.json({
+          success: true,
+          source: 'spotify',
+          title: spotifyInfo.title,
+          artist: spotifyInfo.author_name,
+          thumbnail: spotifyInfo.thumbnail_url,
+          youtubeUrl: ytMatch.url,
+          youtubeId: ytMatch.id,
+          duration: ytMatch.duration
+        });
+      } catch (err) {
+        throw new Error('Spotify koruması nedeniyle sunucu bağlantıyı çözemedi. Şarkıyı indirmek için şarkının adını ve sanatçısını ("Sanatçı - Şarkı Adı") yazıp doğrudan aratın. Şarkıyı bulup hemen indirebiliriz!');
+      }
+    }
+
+    // 2. Case: YouTube Link
+    if (YOUTUBE_URL_REGEX.test(trimmedQuery)) {
+      const match = trimmedQuery.match(YOUTUBE_URL_REGEX);
+      const videoId = match[1];
+      const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      
+      const info = await getYoutubeInfo(videoUrl);
+      
+      return res.json({
+        success: true,
+        source: 'youtube',
+        title: info.title,
+        artist: info.artist,
+        thumbnail: info.thumbnail,
+        youtubeUrl: videoUrl,
+        youtubeId: videoId,
+        duration: info.duration,
+        streamUrl: info.streamUrl
+      });
+    }
+
+    // 3. Case: Raw Text Search
+    const ytMatch = await searchYouTube(trimmedQuery);
+    
+    // Fetch streamUrl for search results
+    let streamUrl = null;
+    try {
+      const info = await getYoutubeInfo(ytMatch.url);
+      streamUrl = info.streamUrl;
+    } catch (e) {
+      console.warn('Stream URL fetch failed for search:', e);
+    }
+    
+    return res.json({
+      success: true,
+      source: 'search',
+      title: ytMatch.title,
+      artist: ytMatch.author,
+      thumbnail: ytMatch.thumbnail,
+      youtubeUrl: ytMatch.url,
+      youtubeId: ytMatch.id,
+      duration: ytMatch.duration,
+      streamUrl: streamUrl
+    });
+
+  } catch (error) {
+    console.error('API /info error:', error);
+    return res.status(200).json({ success: false, error: error.message || 'Bir hata oluştu.' });
+  }
+});
+
+// API Endpoint: Native browser playback through a direct audio stream redirect
+app.get('/api/play', async (req, res) => {
+  const { id } = req.query;
+
+  if (!id) {
+    return res.status(400).json({ success: false, error: 'Video ID gereklidir.' });
+  }
+
+  try {
+    const info = await getYoutubeInfo(`https://www.youtube.com/watch?v=${id}`);
+    if (!info.streamUrl) {
+      throw new Error('Oynatma akışı bulunamadı.');
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.redirect(302, info.streamUrl);
+  } catch (error) {
+    console.error('API /play error:', error);
+    return res.status(500).json({ success: false, error: 'Ses oynatma bağlantısı hazırlanamadı.' });
+  }
+});
+
+// API Endpoint: Same-origin playable audio proxy with Range support for seeking/WebAudio
+app.get('/api/stream', async (req, res) => {
+  const { id } = req.query;
+
+  if (!id) {
+    return res.status(400).json({ success: false, error: 'Video ID gereklidir.' });
+  }
+
+  try {
+    const info = await getYoutubeInfo(`https://www.youtube.com/watch?v=${id}`);
+    if (!info.streamUrl) {
+      throw new Error('Oynatma akışı bulunamadı.');
+    }
+
+    const upstreamHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*'
+    };
+
+    if (req.headers.range) {
+      upstreamHeaders.Range = req.headers.range;
+    }
+
+    const upstream = await fetch(info.streamUrl, { headers: upstreamHeaders });
+    if (!upstream.ok && upstream.status !== 206) {
+      throw new Error(`Akış sunucusu yanıt vermedi: ${upstream.status}`);
+    }
+
+    res.status(upstream.status);
+    ['content-type', 'content-length', 'accept-ranges', 'content-range'].forEach((header) => {
+      const value = upstream.headers.get(header);
+      if (value) res.setHeader(header, value);
+    });
+    res.setHeader('Cache-Control', 'no-store');
+
+    if (!upstream.body) {
+      return res.end();
+    }
+
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (error) {
+    console.error('API /stream error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Ses akışı hazırlanamadı.' });
+    }
+  }
+});
+
+app.get('/api/stems/status', async (req, res) => {
+  const { id } = req.query;
+
+  if (!id) {
+    return res.status(400).json({ success: false, error: 'Video ID gereklidir.' });
+  }
+
+  try {
+    const status = await readAiStemStatus(id);
+    return res.json({ success: true, ...status });
+  } catch (error) {
+    console.error('API /stems/status error:', error);
+    return res.status(500).json({ success: false, error: 'AI durum bilgisi okunamadı.' });
+  }
+});
+
+app.post('/api/stems/prepare', async (req, res) => {
+  const id = req.body?.id || req.query.id;
+
+  if (!id) {
+    return res.status(400).json({ success: false, error: 'Video ID gereklidir.' });
+  }
+
+  try {
+    const cleanId = safeYoutubeId(id);
+    const existingStatus = await readAiStemStatus(cleanId);
+    if (existingStatus.ready) {
+      return res.json({ success: true, ...existingStatus });
+    }
+
+    if (!aiStemJobs.has(cleanId)) {
+      await writeAiStemStatus(cleanId, 'queued', 'AI ayırma kuyruğa alındı.');
+    }
+    ensureAiStems(cleanId).catch((error) => {
+      console.error('AI stem prepare failed:', error);
+    });
+
+    const status = await readAiStemStatus(cleanId);
+    return res.status(status.ready ? 200 : 202).json({ success: true, ...status });
+  } catch (error) {
+    console.error('API /stems/prepare error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'AI ayırma başlatılamadı.' });
+  }
+});
+
+// API Endpoint: Stream download audio (Supports on-the-fly vocal/instrumental separation via FFmpeg)
+function clampPercent(value, fallback = 100) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(200, Math.max(0, parsed));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function normalizeStemMode(mode, vocalPercent, musicPercent, hasStemControls) {
+  const normalized = typeof mode === 'string' ? mode.toLowerCase() : '';
+  if (['vocals', 'vocal'].includes(normalized)) return 'vocals';
+  if (['instrumental', 'music', 'inst'].includes(normalized)) return 'instrumental';
+  if (['mix', 'mixed', 'miks'].includes(normalized)) return 'mix';
+  if (['original', 'normal', 'none'].includes(normalized)) return 'original';
+
+  if (vocalPercent > 0 && musicPercent === 0) return 'vocals';
+  if (vocalPercent === 0 && musicPercent > 0) return 'instrumental';
+  if (hasStemControls) return 'mix';
+
+  return 'original';
+}
+
+function getAudioEffects(query) {
+  const originalBpm = clampNumber(query.originalBpm, 40, 240, 0);
+  const targetBpm = clampNumber(query.targetBpm, 40, 240, 0);
+  const pitchSemitones = Math.round(clampNumber(query.pitch, -12, 12, 0));
+  const tempoRatio = originalBpm > 0 && targetBpm > 0
+    ? clampNumber(targetBpm / originalBpm, 0.5, 2, 1)
+    : 1;
+  const pitchRatio = Math.pow(2, pitchSemitones / 12);
+
+  return {
+    tempoRatio,
+    pitchRatio,
+    pitchSemitones,
+    active: Math.abs(tempoRatio - 1) > 0.005 || pitchSemitones !== 0
+  };
+}
+
+function buildEffectFilter(effects) {
+  if (!effects.active) return '';
+  return `rubberband=tempo=${effects.tempoRatio.toFixed(4)}:pitch=${effects.pitchRatio.toFixed(4)}:formant=preserved`;
+}
+
+function joinFilters(filters) {
+  return filters.filter(Boolean).join(',');
+}
+
+function buildStemFilter(mode, vocalGain, musicGain, effects) {
+  const effectFilter = buildEffectFilter(effects);
+  const limiter = 'alimiter=limit=0.95';
+  const vocalCenter = joinFilters([
+    'aformat=channel_layouts=stereo',
+    'pan=mono|c0=0.5*FL+0.5*FR',
+    'highpass=f=140',
+    'lowpass=f=7200',
+    'afftdn=nf=-24',
+    'compand=attacks=0:decays=0.25:points=-80/-80|-45/-35|-18/-12|0/-3',
+    `volume=${vocalGain.toFixed(3)}`
+  ]);
+  const instrumentalCenterCancel = `[0:a]aformat=channel_layouts=stereo,asplit=2[st][bass];[st]pan=stereo|c0=FL-FR|c1=FR-FL,volume=${(musicGain * 1.8).toFixed(3)},highpass=f=120[side];[bass]pan=mono|c0=0.5*FL+0.5*FR,lowpass=f=180,volume=${(musicGain * 0.9).toFixed(3)},pan=stereo|c0=c0|c1=c0[low];[side][low]${joinFilters(['amix=inputs=2:duration=longest:normalize=0', effectFilter, limiter])}[aout]`;
+
+  if (mode === 'vocals') {
+    return { type: 'audio', value: joinFilters([vocalCenter, effectFilter, limiter]) };
+  }
+
+  if (mode === 'instrumental') {
+    return { type: 'complex', value: instrumentalCenterCancel };
+  }
+
+  if (mode === 'mix') {
+    return {
+      type: 'complex',
+      value: `[0:a]aformat=channel_layouts=stereo,asplit=3[vsrc][st][bass];[vsrc]pan=mono|c0=0.5*FL+0.5*FR,highpass=f=140,lowpass=f=7200,volume=${vocalGain.toFixed(3)}[v];[st]pan=stereo|c0=FL-FR|c1=FR-FL,volume=${(musicGain * 1.5).toFixed(3)},highpass=f=120[side];[bass]pan=mono|c0=0.5*FL+0.5*FR,lowpass=f=180,volume=${(musicGain * 0.75).toFixed(3)},pan=stereo|c0=c0|c1=c0[low];[side][low]amix=inputs=2:duration=longest:normalize=0[m];[v][m]${joinFilters(['amix=inputs=2:duration=longest:normalize=0', effectFilter, limiter])}[aout]`
+    };
+  }
+
+  if (effectFilter) {
+    return { type: 'audio', value: joinFilters([effectFilter, limiter]) };
+  }
+
+  return null;
+}
+
+function buildAiStemFilter(mode, vocalGain, musicGain, effects) {
+  const effectFilter = buildEffectFilter(effects);
+  const limiter = 'alimiter=limit=0.95';
+
+  if (mode === 'vocals') {
+    return {
+      type: 'audio',
+      value: joinFilters([`volume=${vocalGain.toFixed(3)}`, effectFilter, limiter])
+    };
+  }
+
+  if (mode === 'instrumental') {
+    return {
+      type: 'audio',
+      value: joinFilters([`volume=${musicGain.toFixed(3)}`, effectFilter, limiter])
+    };
+  }
+
+  if (mode === 'mix') {
+    return {
+      type: 'complex',
+      value: `[0:a]volume=${vocalGain.toFixed(3)}[v];[1:a]volume=${musicGain.toFixed(3)}[m];[v][m]${joinFilters(['amix=inputs=2:duration=longest:normalize=0', effectFilter, limiter])}[aout]`
+    };
+  }
+
+  return null;
+}
+
+app.get('/api/download', async (req, res) => {
+  const { id, title, format, mode } = req.query;
+  
+  const vocalPercent = clampPercent(req.query.vocalVol, 100);
+  const musicPercent = clampPercent(req.query.musicVol, 100);
+  const hasStemControls = req.query.vocalVol !== undefined || req.query.musicVol !== undefined || mode !== undefined;
+  const stemMode = normalizeStemMode(mode, vocalPercent, musicPercent, hasStemControls);
+  const vocalVol = stemMode === 'vocals' && vocalPercent === 0 ? 1 : vocalPercent / 100;
+  const musicVol = stemMode === 'instrumental' && musicPercent === 0 ? 1 : musicPercent / 100;
+  const isInlinePlayback = req.query.play === '1' || req.query.inline === '1';
+  const audioEffects = getAudioEffects(req.query);
+
+  if (!id) {
+    return res.status(400).json({ success: false, error: 'Video ID gereklidir.' });
+  }
+
+  const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+  
+  const suffixMap = {
+    vocals: ' (Vokal)',
+    instrumental: ' (Altyapi)',
+    mix: ' (Miks)'
+  };
+  const suffix = suffixMap[stemMode] || '';
+  
+  const filename = ((title ? title.toString() : 'download') + suffix)
+    .replace(/[\\\/:\*\?"<>\|]/g, '')
+    .trim();
+
+  const isWav = format === 'wav';
+  const useAiStems = req.query.ai === '1' && ['vocals', 'instrumental', 'mix'].includes(stemMode);
+  
+  let ytDlpProcess = null;
+  let ffmpegProcess = null;
+
+  try {
+    if (useAiStems) {
+      const stemPaths = await ensureAiStems(id);
+      let ffmpegArgs = ['-hide_banner', '-loglevel', 'error'];
+
+      if (stemMode === 'mix') {
+        ffmpegArgs.push('-i', stemPaths.vocals, '-i', stemPaths.instrumental);
+      } else {
+        ffmpegArgs.push('-i', stemMode === 'vocals' ? stemPaths.vocals : stemPaths.instrumental);
+      }
+
+      const aiStemFilter = buildAiStemFilter(stemMode, vocalVol, musicVol, audioEffects);
+      if (aiStemFilter?.type === 'audio') {
+        ffmpegArgs.push('-af', aiStemFilter.value);
+      } else if (aiStemFilter?.type === 'complex') {
+        ffmpegArgs.push('-filter_complex', aiStemFilter.value, '-map', '[aout]');
+      }
+
+      ffmpegArgs.push('-vn');
+
+      if (isInlinePlayback) {
+        ffmpegArgs.push('-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', 'pipe:1');
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Cache-Control', 'no-store');
+      } else if (isWav) {
+        ffmpegArgs.push('-f', 'wav', 'pipe:1');
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.wav"`);
+        res.setHeader('Content-Type', 'audio/wav');
+      } else {
+        ffmpegArgs.push('-c:a', 'aac', '-b:a', '256k', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.m4a"`);
+        res.setHeader('Content-Type', 'audio/mp4');
+      }
+
+      ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs, { windowsHide: true });
+      ffmpegProcess.stdout.pipe(res);
+
+      ffmpegProcess.on('error', (err) => {
+        console.error('AI ffmpeg hata:', err);
+        if (!res.headersSent) res.status(500).send('AI stem işlenemedi.');
+      });
+
+      ffmpegProcess.stderr.on('data', (chunk) => {
+        console.error('AI ffmpeg stderr:', chunk.toString());
+      });
+
+      req.on('close', () => {
+        if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill();
+      });
+
+      return;
+    }
+
+    const dlpArgs = ['-f', 'bestaudio', '-o', '-', videoUrl];
+    ytDlpProcess = spawn(YTDLP_PATH, dlpArgs);
+
+    let ffmpegArgs = ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0'];
+    const stemFilter = buildStemFilter(stemMode, vocalVol, musicVol, audioEffects);
+
+    if (stemFilter?.type === 'audio') {
+      ffmpegArgs.push('-af', stemFilter.value);
+    } else if (stemFilter?.type === 'complex') {
+      ffmpegArgs.push('-filter_complex', stemFilter.value, '-map', '[aout]');
+    }
+
+    ffmpegArgs.push('-vn');
+
+    if (isInlinePlayback) {
+      ffmpegArgs.push('-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', 'pipe:1');
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'no-store');
+    } else if (isWav) {
+      ffmpegArgs.push('-f', 'wav', 'pipe:1');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.wav"`);
+      res.setHeader('Content-Type', 'audio/wav');
+    } else {
+      ffmpegArgs.push('-c:a', 'aac', '-b:a', '256k', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}.m4a"`);
+      res.setHeader('Content-Type', 'audio/mp4');
+    }
+
+    ffmpegProcess = spawn(FFMPEG_PATH, ffmpegArgs);
+
+    ytDlpProcess.stdout.on('error', (err) => console.error('yt-dlp stdout pipe error:', err));
+    ffmpegProcess.stdin.on('error', (err) => console.error('ffmpeg stdin pipe error:', err));
+    
+    ytDlpProcess.stdout.pipe(ffmpegProcess.stdin);
+    ffmpegProcess.stdout.pipe(res);
+
+    ytDlpProcess.on('error', (err) => {
+      console.error('yt-dlp hata:', err);
+      if (!res.headersSent) res.status(500).send('Ses indirilemedi.');
+    });
+
+    ffmpegProcess.on('error', (err) => {
+      console.error('ffmpeg hata:', err);
+      if (!res.headersSent) res.status(500).send('Ses işlenemedi.');
+    });
+
+    req.on('close', () => {
+      if (ytDlpProcess && !ytDlpProcess.killed) ytDlpProcess.kill();
+      if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill();
+    });
+
+  } catch (error) {
+    console.error('Download Endpoint Hatası:', error);
+    if (ytDlpProcess && !ytDlpProcess.killed) ytDlpProcess.kill();
+    if (ffmpegProcess && !ffmpegProcess.killed) ffmpegProcess.kill();
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Dosya işlenemedi.' });
+    }
+  }
+});
+
+// Start Server
+app.listen(PORT, () => {
+  console.log(`Sunucu başlatıldı: http://localhost:${PORT}`);
+});

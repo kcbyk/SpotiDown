@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="tr" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>SpotiDown - Mobil Spotify & YouTube Şarkı İndirici</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Google Fonts (Inter) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+          },
+          colors: {
+            spotify: '#1DB954',
+            youtube: '#FF0000',
+            darkbg: '#090A0F',
+            cardbg: '#12131A',
+            cardborder: '#1E202B',
+          },
+          animation: {
+            'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+          }
+        }
+      }
+    }
+  </script>
+  
+  <style>
+    body {
+      background-color: #090A0F;
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(var(--accent-rgb, 29, 185, 84), 0.08) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(255, 0, 0, 0.04) 0px, transparent 50%);
+      background-attachment: fixed;
+      -webkit-tap-highlight-color: transparent;
+    }
+    
+    /* Custom scrollbars for mobile friendliness */
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #090A0F;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--accent-color, #1DB954);
+      border-radius: 4px;
+    }
+
+    /* Tab Switch Transitions */
+    .tab-section {
+      transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
+    }
+
+    /* Professional Scale Pulse for Metronome */
+    @keyframes pulse {
+      0%, 100% {
+        transform: scale(0.85);
+        opacity: 0.8;
+      }
+      50% {
+        transform: scale(1.15);
+        opacity: 0.25;
+        border-color: #22d3ee;
+        box-shadow: 0 0 15px rgba(34, 211, 238, 0.2);
+      }
+    }
+  </style>
+</head>
+<body class="text-gray-100 min-h-screen flex flex-col justify-between font-sans antialiased overflow-x-hidden pb-24">
+
+  <!-- Header -->
+  <header class="w-full max-w-md mx-auto pt-6 px-5 flex items-center justify-between z-10">
+    <div class="flex items-center gap-2">
+      <div class="p-2 bg-gradient-to-tr from-spotify to-emerald-400 rounded-xl shadow-lg shadow-spotify/20" id="header-logo-bg">
+        <i data-lucide="music-4" class="w-6 h-6 text-darkbg stroke-[2.5]" id="header-logo-icon"></i>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-gray-100 to-gray-400 bg-clip-text text-transparent">SpotiDown</h1>
+        <span class="text-[10px] uppercase tracking-widest font-semibold text-spotify" id="header-tagline">Mobil Premium</span>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="flex h-2 w-2 relative">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-2 w-2 bg-spotify"></span>
+      </span>
+      <span class="text-xs font-medium text-gray-400">Aktif</span>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="w-full max-w-md mx-auto px-5 py-4 flex-1 flex flex-col justify-center gap-6 z-10">
+    
+    <!-- 1. TAB: DOWNLOADER SCREEN -->
+    <section id="tab-downloader-screen" class="tab-section space-y-6">
+      <!-- Hero Text -->
+      <div class="text-center space-y-2">
+        <h2 class="text-3xl font-extrabold tracking-tight text-white leading-tight">
+          Sınırsız Şarkı <span class="bg-gradient-to-r from-spotify to-emerald-400 bg-clip-text text-transparent" id="accent-highlight">İndir</span>
+        </h2>
+        <p class="text-sm text-gray-400 px-4">
+          Spotify veya YouTube linkini yapıştırın, yüksek kalitede cihazınıza kaydedin.
+        </p>
+      </div>
+
+      <!-- Search/Paste Card -->
+      <div class="bg-cardbg/80 backdrop-blur-xl border border-cardborder rounded-3xl p-5 shadow-2xl space-y-4">
+        
+        <!-- Input Area -->
+        <div class="relative flex items-center">
+          <!-- Platform Icon (Dynamic) -->
+          <div id="platform-icon-container" class="absolute left-4 text-gray-400 transition-all duration-300">
+            <i data-lucide="search" id="platform-icon" class="w-5 h-5"></i>
+          </div>
+          
+          <input 
+            type="text" 
+            id="search-input" 
+            placeholder="Spotify / YouTube linki veya Şarkı adı..." 
+            class="w-full py-4 pl-12 pr-12 bg-darkbg/90 border border-cardborder/80 focus:border-spotify/50 rounded-2xl text-sm text-white placeholder-gray-500 focus:outline-none transition-all duration-300 focus:ring-4 focus:ring-spotify/10 shadow-inner"
+          >
+          
+          <!-- Clear/Paste Action Button -->
+          <button 
+            id="action-btn" 
+            class="absolute right-4 text-gray-500 hover:text-white transition-colors duration-200"
+            title="Panodan Yapıştır"
+          >
+            <i data-lucide="clipboard" id="action-btn-icon" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <!-- Quick Search / Submit Button -->
+        <button 
+          id="search-btn" 
+          class="w-full py-4 bg-gradient-to-r from-spotify to-emerald-500 hover:from-emerald-500 hover:to-spotify text-darkbg font-bold rounded-2xl flex items-center justify-center gap-2 transition-all duration-300 shadow-lg shadow-spotify/20 active:scale-[0.98]"
+        >
+          <span>Şarkıyı Analiz Et</span>
+          <i data-lucide="arrow-right" class="w-4 h-4 ml-1"></i>
+        </button>
+
+      </div>
+
+      <!-- Loading Panel (Hidden by default) -->
+      <div id="loading-card" class="hidden bg-cardbg/80 backdrop-blur-xl border border-cardborder rounded-3xl p-6 shadow-2xl text-center space-y-4 animate-pulse-slow">
+        <div class="relative w-16 h-16 mx-auto flex items-center justify-center">
+          <!-- Circular spinner -->
+          <div class="absolute inset-0 border-4 border-spotify/20 border-t-spotify rounded-full animate-spin" id="loading-spinner"></div>
+          <i data-lucide="loader-2" class="w-6 h-6 text-spotify animate-spin" id="loading-spinner-icon"></i>
+        </div>
+        <div class="space-y-1">
+          <h4 id="loading-status" class="text-base font-semibold text-white">İşleniyor...</h4>
+          <p id="loading-substatus" class="text-xs text-gray-400">Lütfen bekleyin, veriler sunucuyla eşitleniyor.</p>
+        </div>
+      </div>
+
+      <!-- Song Preview / Result Card (Hidden by default) -->
+      <div id="result-card" class="hidden bg-cardbg/80 backdrop-blur-xl border border-cardborder rounded-3xl p-5 shadow-2xl space-y-5 transition-all duration-500 transform translate-y-4">
+        
+        <!-- Song Info Block -->
+        <div class="flex items-center gap-4">
+          <!-- Thumbnail -->
+          <div class="relative w-24 h-24 rounded-2xl overflow-hidden shadow-lg flex-shrink-0 border border-cardborder">
+            <img id="song-thumbnail" src="" alt="Album Art" class="w-full h-full object-cover">
+            <!-- Dynamic Platform Mini-Badge -->
+            <div id="platform-badge" class="absolute bottom-1 right-1 p-1 rounded-lg backdrop-blur-md shadow-sm">
+              <!-- Icon initialized in JS -->
+            </div>
+          </div>
+          
+          <!-- Metadata -->
+          <div class="flex-1 min-w-0">
+            <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-darkbg border border-cardborder mb-2">
+              <i data-lucide="clock" class="w-3.5 h-3.5 text-gray-400"></i>
+              <span id="song-duration" class="text-[11px] font-semibold text-gray-300">0:00</span>
+            </div>
+            <h3 id="song-title" class="text-base font-bold text-white leading-snug truncate">Şarkı İsmi</h3>
+            <p id="song-artist" class="text-sm text-gray-400 truncate mt-0.5">Sanatçı İsmi</p>
+          </div>
+        </div>
+
+        <!-- Divider -->
+        <div class="h-px bg-cardborder/60"></div>
+
+        <!-- Actions -->
+        <div class="space-y-3">
+          <!-- Download Options Grid -->
+          <div class="grid grid-cols-2 gap-3">
+            <!-- Download M4A Button -->
+            <button 
+              id="download-m4a-btn" 
+              class="w-full py-4.5 bg-gradient-to-r from-spotify to-emerald-500 text-darkbg font-extrabold rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-spotify/15 active:scale-[0.98] transition-all duration-300 text-sm"
+            >
+              <i data-lucide="music" class="w-4 h-4 stroke-[2.5]"></i>
+              <span>M4A (.m4a)</span>
+            </button>
+
+            <!-- Download WAV Button -->
+            <button 
+              id="download-wav-btn" 
+              class="w-full py-4.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-darkbg font-extrabold rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/15 active:scale-[0.98] transition-all duration-300 text-sm"
+            >
+              <i data-lucide="volume-2" class="w-4 h-4 stroke-[2.5]"></i>
+              <span>WAV (.wav)</span>
+            </button>
+          </div>
+
+          <!-- Reset Button -->
+          <button 
+            id="reset-btn" 
+            class="w-full py-3 bg-darkbg text-gray-400 hover:text-white font-medium rounded-xl flex items-center justify-center gap-2 transition-all duration-200 border border-cardborder text-xs"
+          >
+            <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+            <span>Yeni Arama / Başka Şarkı İndir</span>
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Info Cards (Features) -->
+      <div id="features-grid" class="grid grid-cols-2 gap-3">
+        <div class="bg-cardbg/40 border border-cardborder/40 rounded-2xl p-4 flex flex-col items-center text-center space-y-1">
+          <div class="p-2 bg-spotify/10 rounded-xl text-spotify">
+            <i data-lucide="music" class="w-5 h-5"></i>
+          </div>
+          <h5 class="text-xs font-bold text-gray-200">Spotify Desteği</h5>
+          <p class="text-[10px] text-gray-500">Premium hesap olmadan, sadece link ile anında indirme yapın.</p>
+        </div>
+        <div class="bg-cardbg/40 border border-cardborder/40 rounded-2xl p-4 flex flex-col items-center text-center space-y-1">
+          <div class="p-2 bg-youtube/10 rounded-xl text-youtube">
+            <i data-lucide="youtube" class="w-5 h-5"></i>
+          </div>
+          <h5 class="text-xs font-bold text-gray-200">YouTube Desteği</h5>
+          <p class="text-[10px] text-gray-500">YouTube linklerini veya video adlarını anında sese çevirin.</p>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 2. TAB: HISTORY SCREEN -->
+    <section id="tab-history-screen" class="tab-section hidden space-y-5">
+      <div class="text-center space-y-1">
+        <h2 class="text-2xl font-extrabold tracking-tight text-white mb-1">Cihaz Geçmişi</h2>
+        <p class="text-xs text-gray-400">Bu tarayıcıda gerçekleştirdiğiniz tüm indirmeler</p>
+      </div>
+
+      <!-- Empty History State -->
+      <div id="history-empty" class="bg-cardbg/40 border border-cardborder/40 rounded-3xl p-10 text-center space-y-4">
+        <div class="w-14 h-14 bg-cardborder/40 rounded-full flex items-center justify-center mx-auto text-gray-400">
+          <i data-lucide="history" class="w-7 h-7"></i>
+        </div>
+        <div class="space-y-1">
+          <p class="text-sm text-gray-300 font-bold">Henüz Şarkı İndirilmedi</p>
+          <p class="text-xs text-gray-500">İndirdiğiniz parçalar yerel tarayıcınızda kayıtlı tutulur.</p>
+        </div>
+      </div>
+
+      <!-- History List -->
+      <div id="history-list" class="space-y-3 hidden">
+        <!-- Dyn. populated by JS -->
+      </div>
+      
+      <!-- Clear History Button -->
+      <button 
+        id="clear-history-btn" 
+        class="hidden w-full py-4 bg-darkbg hover:bg-darkbg/50 text-red-500 hover:text-red-400 font-semibold rounded-2xl flex items-center justify-center gap-2 transition-all duration-200 border border-cardborder text-xs active:scale-[0.98]"
+      >
+        <i data-lucide="trash-2" class="w-4 h-4"></i>
+        <span>Tüm İndirme Geçmişini Temizle</span>
+      </button>
+    </section>
+
+
+    <!-- 3. TAB: MENU SCREEN (VOCALREMOVER.ORG CLONE!) -->
+    <section id="tab-menu-screen" class="tab-section hidden space-y-6">
+      
+      <!-- Top Title -->
+      <div class="text-center space-y-1">
+        <h2 class="text-2xl font-extrabold tracking-tight text-white">Yapay Zeka Müzik Stüdyosu</h2>
+        <p class="text-xs text-gray-400">Sesleri ayrıştırın, BPM & Ton ölçün ve miksleyin</p>
+      </div>
+
+      <!-- Main VocalRemover Box -->
+      <div class="bg-cardbg/80 border border-cardborder rounded-3xl p-5 shadow-2xl space-y-5">
+        
+        <!-- 1. Real-Time Audio Frequency Wave Canvas -->
+        <div class="relative w-full rounded-2xl overflow-hidden border border-cardborder/80 shadow-md">
+          <canvas id="waveform-canvas" class="w-full h-28 bg-[#090A0F]" width="380" height="110"></canvas>
+          <div class="absolute bottom-2 right-3 px-2 py-0.5 bg-darkbg/90 backdrop-blur-md rounded border border-cardborder text-[8px] text-cyan-400 font-extrabold uppercase">
+            Live Waveform
+          </div>
+        </div>
+
+        <!-- 2. Loaded Song Title/Artist Review -->
+        <div class="space-y-0.5 text-center">
+          <h4 id="player-song-title" class="text-sm font-bold text-white leading-tight truncate px-6">Şarkı Yüklenmedi</h4>
+          <p id="player-song-artist" class="text-xs text-gray-500 truncate px-6">Lütfen arama çubuğundan bir şarkı analiz edin</p>
+        </div>
+
+        <!-- AI Stem Preparation -->
+        <div class="grid grid-cols-[1fr_auto] gap-3 items-center bg-darkbg/45 border border-cardborder/60 rounded-2xl p-3">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <span id="ai-stem-badge" class="px-2 py-0.5 rounded-md border border-cardborder text-[9px] font-extrabold uppercase text-gray-400 bg-darkbg">AI Bekliyor</span>
+            </div>
+            <p id="ai-stem-status-text" class="text-[11px] text-gray-500 font-semibold truncate mt-1">Temiz vokal ve beat için AI ayırmayı başlatın.</p>
+          </div>
+          <button
+            id="prepare-ai-btn"
+            class="px-3 py-2.5 bg-spotify text-darkbg rounded-xl font-extrabold text-[10px] flex items-center gap-1.5 shadow shadow-spotify/20 active:scale-95 transition-all"
+            title="AI ile Ayır"
+          >
+            <i data-lucide="sparkles" class="w-4 h-4"></i>
+            <span>AI Ayır</span>
+          </button>
+        </div>
+
+        <!-- 3. Seek Progress Slider (İleri/Geri Sarma) -->
+        <div class="space-y-1">
+          <div class="flex items-center justify-between text-[11px] text-gray-500 font-semibold px-1">
+            <span id="player-time-current">00:00</span>
+            <span id="player-time-total">00:00</span>
+          </div>
+          <input 
+            type="range" 
+            id="player-seek" 
+            min="0" 
+            max="100" 
+            value="0" 
+            class="w-full h-1 bg-darkbg/80 hover:bg-darkbg rounded-lg appearance-none cursor-pointer accent-spotify border border-cardborder"
+          >
+        </div>
+
+        <!-- 4. Playback Controller & Master Volume Bar -->
+        <div class="flex items-center justify-between gap-2 bg-darkbg/50 border border-cardborder/60 p-3 rounded-2xl">
+          <!-- Playback controls -->
+          <div class="flex items-center gap-3">
+            <button id="player-prev" class="p-2.5 bg-darkbg border border-cardborder text-gray-500 hover:text-white rounded-xl transition-all duration-200 active:scale-90" title="Önceki Şarkı">
+              <i data-lucide="skip-back" class="w-4 h-4"></i>
+            </button>
+            
+            <button id="player-play-btn" class="p-3.5 bg-gradient-to-r from-spotify to-emerald-500 text-darkbg rounded-full shadow shadow-spotify/20 hover:scale-105 active:scale-95 transition-all duration-200 flex items-center justify-center" title="Oynat / Durdur">
+              <i data-lucide="play" class="w-5 h-5 stroke-[3]" id="player-play-icon"></i>
+            </button>
+            
+            <button id="player-next" class="p-2.5 bg-darkbg border border-cardborder text-gray-500 hover:text-white rounded-xl transition-all duration-200 active:scale-90" title="Sonraki Şarkı">
+              <i data-lucide="skip-forward" class="w-4 h-4"></i>
+            </button>
+          </div>
+
+          <!-- Master Volume controls -->
+          <div class="flex items-center gap-2">
+            <i data-lucide="volume-2" class="w-4 h-4 text-gray-500"></i>
+            <input 
+              type="range" 
+              id="player-volume" 
+              min="0" 
+              max="100" 
+              value="80" 
+              class="w-18 h-1 bg-darkbg rounded-lg appearance-none cursor-pointer accent-spotify border border-cardborder"
+            >
+          </div>
+        </div>
+
+        <!-- Hidden Native Audio Node -->
+        <audio id="realtime-audio" loop></audio>
+
+        <!-- 5. Interactive Stem Mixing Sliders (Music vs Vocal) -->
+        <div class="space-y-4 pt-1">
+          <!-- Music/Instrumental Stem Slider -->
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between text-xs font-bold text-gray-300">
+              <div class="flex items-center gap-1.5">
+                <i data-lucide="guitar" class="w-4 h-4 text-cyan-400"></i>
+                <span>Müzik (Beats)</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button id="mute-music-btn" class="text-gray-500 hover:text-white transition-colors" title="Sessize Al">
+                  <i data-lucide="volume-x" class="w-3.5 h-3.5" id="mute-music-icon"></i>
+                </button>
+                <span id="music-val">100%</span>
+              </div>
+            </div>
+            <input 
+              type="range" 
+              id="music-slider" 
+              min="0" 
+              max="200" 
+              value="100" 
+              class="w-full h-1.5 bg-darkbg rounded-lg appearance-none cursor-pointer accent-spotify border border-cardborder"
+            >
+          </div>
+
+          <!-- Vocal/Voice Stem Slider -->
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between text-xs font-bold text-gray-300">
+              <div class="flex items-center gap-1.5">
+                <i data-lucide="mic" class="w-4 h-4 text-spotify"></i>
+                <span>Vokal (Lyrics)</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button id="mute-vocals-btn" class="text-gray-500 hover:text-white transition-colors" title="Sessize Al">
+                  <i data-lucide="volume-x" class="w-3.5 h-3.5" id="mute-vocals-icon"></i>
+                </button>
+                <span id="vocal-val">100%</span>
+              </div>
+            </div>
+            <input 
+              type="range" 
+              id="vocal-slider" 
+              min="0" 
+              max="200" 
+              value="100" 
+              class="w-full h-1.5 bg-darkbg rounded-lg appearance-none cursor-pointer accent-spotify border border-cardborder"
+            >
+          </div>
+        </div>
+
+        <!-- 6. BPM & Key Parameters Grid & Pulse beat -->
+        <div class="grid grid-cols-2 gap-3 pt-1 border-t border-cardborder/60">
+          <!-- BPM Display info -->
+          <div class="bg-darkbg border border-cardborder p-3.5 rounded-2xl text-center relative overflow-hidden flex flex-col justify-center">
+            <span class="text-[9px] uppercase font-extrabold text-gray-500 tracking-wider">BPM (Ritim)</span>
+            <h4 id="detected-bpm" class="text-2xl font-black text-white mt-1">120</h4>
+            <!-- Pulsing metronome beat line -->
+            <div id="bpm-pulse-back" class="absolute inset-0 border-2 border-spotify/15 rounded-2xl pointer-events-none scale-90"></div>
+          </div>
+          
+          <!-- Key Scale Display info -->
+          <div class="bg-darkbg border border-cardborder p-3.5 rounded-2xl text-center flex flex-col justify-center">
+            <span class="text-[9px] uppercase font-extrabold text-gray-500 tracking-wider">Anahtar Ton</span>
+            <h4 id="detected-key" class="text-2xl font-black text-white mt-1">La Minör</h4>
+          </div>
+        </div>
+
+        <!-- 6.1 Tempo & Pitch Controls -->
+        <div class="space-y-3 bg-darkbg/45 border border-cardborder/60 rounded-2xl p-3">
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between text-[10px] font-extrabold uppercase tracking-widest text-gray-400">
+              <span>BPM</span>
+              <span id="bpm-target-val" class="text-spotify">120</span>
+            </div>
+            <input
+              type="range"
+              id="bpm-slider"
+              min="60"
+              max="200"
+              value="120"
+              class="w-full h-1.5 bg-darkbg rounded-lg appearance-none cursor-pointer accent-spotify border border-cardborder"
+            >
+          </div>
+
+          <div class="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
+            <select
+              id="key-shift-select"
+              class="min-w-0 bg-darkbg border border-cardborder text-gray-200 text-xs font-bold rounded-xl px-3 py-2.5 focus:outline-none focus:border-spotify"
+            >
+              <option value="-12">-12 Ton</option>
+              <option value="-11">-11 Ton</option>
+              <option value="-10">-10 Ton</option>
+              <option value="-9">-9 Ton</option>
+              <option value="-8">-8 Ton</option>
+              <option value="-7">-7 Ton</option>
+              <option value="-6">-6 Ton</option>
+              <option value="-5">-5 Ton</option>
+              <option value="-4">-4 Ton</option>
+              <option value="-3">-3 Ton</option>
+              <option value="-2">-2 Ton</option>
+              <option value="-1">-1 Ton</option>
+              <option value="0" selected>Orijinal Ton</option>
+              <option value="1">+1 Ton</option>
+              <option value="2">+2 Ton</option>
+              <option value="3">+3 Ton</option>
+              <option value="4">+4 Ton</option>
+              <option value="5">+5 Ton</option>
+              <option value="6">+6 Ton</option>
+              <option value="7">+7 Ton</option>
+              <option value="8">+8 Ton</option>
+              <option value="9">+9 Ton</option>
+              <option value="10">+10 Ton</option>
+              <option value="11">+11 Ton</option>
+              <option value="12">+12 Ton</option>
+            </select>
+            <button
+              id="studio-apply-btn"
+              class="p-2.5 bg-spotify text-darkbg rounded-xl shadow shadow-spotify/20 active:scale-95 transition-all"
+              title="Uygula"
+            >
+              <i data-lucide="check" class="w-4 h-4 stroke-[3]"></i>
+            </button>
+            <button
+              id="studio-reset-btn"
+              class="p-2.5 bg-darkbg border border-cardborder text-gray-400 hover:text-white rounded-xl active:scale-95 transition-all"
+              title="Sıfırla"
+            >
+              <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 7. Save Actions / Stem Exports Segment (Exactly like vocalremover.org) -->
+        <div class="pt-3 border-t border-cardborder/60 space-y-3">
+          
+          <!-- Default Download format options -->
+          <div class="flex items-center justify-between text-[10px] font-bold text-gray-400 uppercase tracking-widest px-1">
+            <span>Kaydetme Seçenekleri</span>
+            <div class="flex items-center gap-2 bg-darkbg p-0.5 rounded-lg border border-cardborder">
+              <button id="set-m4a" class="px-2 py-0.5 rounded text-[8px] font-extrabold bg-spotify text-darkbg shadow">M4A</button>
+              <button id="set-wav" class="px-2 py-0.5 rounded text-[8px] font-extrabold hover:text-white transition-colors">WAV</button>
+            </div>
+          </div>
+
+          <!-- Triple Download Action Buttons -->
+          <div class="space-y-2">
+            <div class="grid grid-cols-2 gap-2.5">
+              <!-- Müzik (Altyapı) -->
+              <button 
+                id="download-inst-btn" 
+                class="py-4 bg-gradient-to-r from-cyan-500/20 to-blue-500/25 border border-cyan-500/35 hover:scale-[1.01] text-cyan-400 font-extrabold rounded-2xl flex items-center justify-center gap-1.5 active:scale-[0.98] transition-all duration-300 text-xs shadow-inner shadow-cyan-500/5"
+              >
+                <i data-lucide="guitar" class="w-4 h-4"></i>
+                <span>Müziği Kaydet</span>
+              </button>
+
+              <!-- Vokal (Isolated) -->
+              <button 
+                id="download-vocals-btn" 
+                class="py-4 bg-gradient-to-r from-emerald-500/20 to-teal-500/25 border border-emerald-500/35 hover:scale-[1.01] text-emerald-400 font-extrabold rounded-2xl flex items-center justify-center gap-1.5 active:scale-[0.98] transition-all duration-300 text-xs shadow-inner shadow-emerald-500/5"
+              >
+                <i data-lucide="mic" class="w-4 h-4"></i>
+                <span>Vokali Kaydet</span>
+              </button>
+            </div>
+
+            <!-- Miksi Kaydet (Blended remix!) -->
+            <button 
+              id="download-miks-btn" 
+              class="w-full py-4 bg-gradient-to-r from-spotify to-emerald-500 hover:from-emerald-500 hover:to-spotify text-darkbg font-black rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-spotify/20 active:scale-[0.98] transition-all duration-300 text-sm"
+            >
+              <i data-lucide="save" class="w-4.5 h-4.5 stroke-[2.5]" id="visualizer-play-icon"></i>
+              <span>Miksi Kaydet (Harmanlanmış Yapı)</span>
+            </button>
+          </div>
+
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Notification Popup (Toast) -->
+  <div id="toast" class="fixed bottom-28 left-1/2 -translate-x-1/2 z-50 bg-red-600 text-white font-medium px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2 transform translate-y-48 transition-transform duration-300 max-w-sm w-[90%] text-sm">
+    <i data-lucide="alert-circle" class="w-5 h-5 flex-shrink-0"></i>
+    <span id="toast-message" class="truncate">Bir hata oluştu!</span>
+  </div>
+
+  <!-- Bottom Navigation Bar -->
+  <nav class="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-cardbg/95 backdrop-blur-md border-t border-cardborder px-4 py-3 pb-5 flex items-center justify-around z-40 rounded-t-3xl shadow-[0_-8px_30px_rgb(0,0,0,0.4)]">
+    
+    <!-- Tab 1 Button -->
+    <button id="nav-downloader" class="nav-item flex flex-col items-center gap-1 text-spotify transition-all duration-200">
+      <i data-lucide="download" class="w-5 h-5 stroke-[2.5]"></i>
+      <span class="text-[9px] font-bold">Şarkı İndir</span>
+    </button>
+    
+    <!-- Tab 2 Button -->
+    <button id="nav-history" class="nav-item flex flex-col items-center gap-1 text-gray-500 hover:text-white transition-all duration-200">
+      <i data-lucide="history" class="w-5 h-5 stroke-[2.5]"></i>
+      <span class="text-[9px] font-bold">Geçmiş</span>
+    </button>
+    
+    <!-- Tab 3 Button -->
+    <button id="nav-menu" class="nav-item flex flex-col items-center gap-1 text-gray-500 hover:text-white transition-all duration-200">
+      <i data-lucide="menu" class="w-5 h-5 stroke-[2.5]"></i>
+      <span class="text-[9px] font-bold">Menü</span>
+    </button>
+
+  </nav>
+
+  <script src="app.js?v=3.0"></script>
+</body>
+</html>
