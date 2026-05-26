@@ -1113,8 +1113,9 @@ app.get('/api/download', async (req, res) => {
 });
 
 // Start Server
-app.listen(PORT, () => {
-  console.log(`Sunucu başlatıldı: http://localhost:${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`Sunucu başlatıldı: http://${HOST}:${PORT}`);
   ensureYtDlpCookiesFile()
     .then((cookiePath) => {
       console.log(`yt-dlp cookies: ${cookiePath ? 'enabled' : 'disabled'}`);

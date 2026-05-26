@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "local-worker": "node scripts/local_worker.js"
+    "local-worker": "node scripts/local_worker.js",
+    "lan": "set PORT=8000&& set HOST=0.0.0.0&& node server.js"
   },
   "dependencies": {
     "@capacitor/android": "^8.3.4",

@@ -3,7 +3,7 @@
   "appName": "SpotiDown",
   "webDir": "public",
   "server": {
-    "url": "https://spoti-down-sage.vercel.app",
-    "cleartext": false
+    "url": "http://192.168.1.107:8000",
+    "cleartext": true
   }
 }
