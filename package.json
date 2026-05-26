@@ -9,6 +9,9 @@
     "local-worker": "node scripts/local_worker.js",
     "lan": "set PORT=8000&& set HOST=0.0.0.0&& node server.js"
   },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
     "@capacitor/android": "^8.3.4",
     "@capacitor/cli": "^8.3.4",
